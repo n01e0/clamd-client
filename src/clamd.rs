@@ -2,8 +2,13 @@ use anyhow::{Context, Result};
 use std::ffi::CString;
 use std::io::prelude::*;
 use std::os::unix::net::UnixStream;
+use std::net::Shutdown;
 use std::path::Path;
+use std::fs::File;
 use thiserror::Error;
+
+/// Default value for chunk size used in instream scan ref: man clamd
+const DEFAULT_CHUNK_SIZE: u32 = 4096;
 
 #[derive(Debug, Error)]
 pub enum ClamdError {
@@ -18,14 +23,20 @@ pub struct Clamd {
     stream: UnixStream,
 }
 
+impl Drop for Clamd {
+    fn drop(&mut self) {
+        _ = self.stream.shutdown(Shutdown::Both);
+    }
+}
+
 impl Clamd {
     /// Connect to clamd with default socket
     pub fn new() -> Result<Clamd> {
-        Clamd::connect("/var/run/clamav/clamd.ctl")
+        Clamd::local_connect("/var/run/clamav/clamd.ctl")
     }
 
     /// Connect to clamd with specificated socket
-    pub fn connect<P: AsRef<Path>>(sock: P) -> Result<Clamd> {
+    pub fn local_connect<P: AsRef<Path>>(sock: P) -> Result<Clamd> {
         Ok(Clamd {
             stream: UnixStream::connect(sock.as_ref())
                 .with_context(|| "Can't connect unix stream")?,
@@ -58,7 +69,7 @@ impl Clamd {
             .with_context(|| "Can't write to unix stream")
     }
 
-    /// Scan a file or directory (recursively)
+    /// Scan a file or directory (recursively).
     pub fn scan<P: AsRef<Path>>(&mut self, path: P) -> Result<String> {
         if !path.as_ref().is_absolute() {
             return Err(ClamdError::PathIsNotAbsolute.into());
@@ -66,21 +77,45 @@ impl Clamd {
         self.command(format!("zSCAN {}", path.as_ref().display()))
     }
 
+    /// Scan a file or directory (recursively) and don't stop the scanning when a malware found.
     pub fn contscan<P: AsRef<Path>>(&mut self, path: P) -> Result<String> {
         self.command(format!("zCONTSCAN {}", path.as_ref().display()))
     }
 
+    /// Scan a file or directory (recursively) using multi thread.
     pub fn multiscan<P: AsRef<Path>>(&mut self, path: P) -> Result<String> {
         self.command(format!("zMULTISCAN {}", path.as_ref().display()))
     }
 
-    fn command<S: AsRef<str>>(&mut self, request: S) -> Result<String> {
-        let mut resp = Vec::new();
-        let req = CString::new(request.as_ref()).with_context(|| "Can't create CString")?;
+    /// Instream Scan. 
+    pub fn instream_scan<P: AsRef<Path>>(&mut self, path: P, chunk_size: Option<u32>) -> Result<String> {
+        self.send("zINSTREAM")?;
+        let mut file = File::open(path).with_context(|| "Can't open file")?;
+        let mut buf = vec![0; chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE) as usize];
+        loop {
+            let size = file.read(&mut buf).with_context(|| "Can't read from file")?;
+            if size != 0 {
+                self.send(&(size as u32).to_be_bytes())?;
+                self.send(&buf[0..size])?
+            } else {
+                self.send(&[0; 4])?; // zero sized chunk
+                break;
+            }
+        }
 
+        self.recv()
+    }
+    
+    fn send<S: AsRef<[u8]>>(&mut self, msg: S) -> Result<()> {
+        let req = CString::new(msg.as_ref()).with_context(|| "Can't create CString for send")?;
         self.stream
             .write_all(req.as_bytes_with_nul())
             .with_context(|| "Can't write to unix stream")?;
+        Ok(())
+    }
+
+    fn recv(&mut self) -> Result<String> {
+        let mut resp = Vec::new();
         self.stream
             .read_to_end(&mut resp)
             .with_context(|| "Can't read from unix stream")?;
@@ -90,6 +125,11 @@ impl Clamd {
             .map_err(|e| ClamdError::StringifyError(e.as_bytes().to_vec()))?
         )
     }
+
+    fn command<S: AsRef<[u8]>>(&mut self, msg: S) -> Result<String> {
+        self.send(msg)?;
+        self.recv()
+    }
 }
 
 #[cfg(test)]
@@ -97,9 +137,9 @@ mod clamd {
     use super::*;
 
     #[test]
-    fn clamd_connection() {
+    fn clamd_local_connection() {
         assert!(Clamd::new().is_ok());
-        assert!(Clamd::connect("/var/run/clamav/clamd.ctl").is_ok());
+        assert!(Clamd::local_connect("/var/run/clamav/clamd.ctl").is_ok());
     }
 
     #[test]
@@ -110,7 +150,6 @@ mod clamd {
         assert!(resp.is_ok());
         assert_eq!("PONG\0", &resp.unwrap()[..])
     }
-
     #[test]
     fn version() {
         let mut clamd = Clamd::new().unwrap();
@@ -162,7 +201,13 @@ mod clamd {
 
         let resp = clamd.scan("./d0a353461bc77cb023d730e527c5160c7eb8b303");
         assert!(resp.is_err());
-        let resp = clamd.scan("/proc/self/cwd");
+    }
+
+    #[test]
+    fn instream_scan() {
+        let mut clamd = Clamd::new().unwrap();
+
+        let resp = clamd.instream_scan("/bin/ls", None);
         assert!(resp.is_ok());
     }
 }
