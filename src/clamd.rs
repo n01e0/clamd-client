@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
 use std::ffi::CString;
-use std::io::prelude::*;
-use std::os::unix::net::UnixStream;
-use std::net::Shutdown;
-use std::path::Path;
 use std::fs::File;
+use std::io::prelude::*;
+use std::net::Shutdown;
+use std::os::unix::net::UnixStream;
+use std::path::Path;
 use thiserror::Error;
 
 /// Default value for chunk size used in instream scan ref: man clamd
@@ -87,27 +87,37 @@ impl Clamd {
         self.command(format!("zMULTISCAN {}", path.as_ref().display()))
     }
 
-    /// Instream Scan. 
-    pub fn instream_scan<P: AsRef<Path>>(&mut self, path: P, chunk_size: Option<u32>) -> Result<String> {
-        self.send("zINSTREAM")?;
+    /// Instream Scan.
+    pub fn instream_scan<P: AsRef<Path>>(
+        &mut self,
+        path: P,
+        chunk_size: Option<u32>,
+    ) -> Result<String> {
+        self.sendmsg("zINSTREAM")?;
         let mut file = File::open(path).with_context(|| "Can't open file")?;
         let mut buf = vec![0; chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE) as usize];
         loop {
-            let size = file.read(&mut buf).with_context(|| "Can't read from file")?;
+            let size = file
+                .read(&mut buf)
+                .with_context(|| "Can't read from file")?;
             if size != 0 {
-                self.send(&(size as u32).to_be_bytes())?;
+                self.send((size as u32).to_be_bytes())?;
                 self.send(&buf[0..size])?
             } else {
-                self.send(&[0; 4])?; // zero sized chunk
+                self.send([0; 4])?; // zero sized chunk
                 break;
             }
         }
 
         self.recv()
     }
-    
-    fn send<S: AsRef<[u8]>>(&mut self, msg: S) -> Result<()> {
-        let req = CString::new(msg.as_ref()).with_context(|| "Can't create CString for send")?;
+
+    fn send<S: AsRef<[u8]>>(&mut self, data: S) -> Result<()> {
+        self.stream.write_all(data.as_ref()).with_context(|| "Can't write to unix stream")
+    }
+
+    fn sendmsg<S: AsRef<[u8]>>(&mut self, msg: S) -> Result<()> {
+        let req = CString::new(msg.as_ref()).with_context(|| "Can't create CString for send from {:?}")?;
         self.stream
             .write_all(req.as_bytes_with_nul())
             .with_context(|| "Can't write to unix stream")?;
@@ -120,14 +130,12 @@ impl Clamd {
             .read_to_end(&mut resp)
             .with_context(|| "Can't read from unix stream")?;
 
-        Ok(
-            String::from_utf8(resp)
-            .map_err(|e| ClamdError::StringifyError(e.as_bytes().to_vec()))?
-        )
+        Ok(String::from_utf8(resp)
+            .map_err(|e| ClamdError::StringifyError(e.as_bytes().to_vec()))?)
     }
 
     fn command<S: AsRef<[u8]>>(&mut self, msg: S) -> Result<String> {
-        self.send(msg)?;
+        self.sendmsg(msg)?;
         self.recv()
     }
 }
