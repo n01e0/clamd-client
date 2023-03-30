@@ -2,9 +2,10 @@ use anyhow::{Context, Result};
 use std::ffi::CString;
 use std::fs::File;
 use std::io::prelude::*;
-use std::net::Shutdown;
+use std::net::{Shutdown, SocketAddr};
+#[cfg(target_family = "unix")]
 use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 /// Default value for chunk size used in instream scan ref: man clamd
@@ -16,6 +17,22 @@ pub enum ClamdError {
     StringifyError(Vec<u8>),
     #[error("The path is not absolute")]
     PathIsNotAbsolute,
+}
+
+#[derive(Debug)]
+pub enum StreamType {
+    Tcp(SocketAddr),
+    #[cfg(target_family = "unix")]
+    Unix(PathBuf),
+}
+
+impl std::string::ToString for StreamType {
+    fn to_string(&self) -> String {
+        match self {
+            Self::Tcp(addr) => addr.to_string(),
+            Self::Unix(path) => String::from(path.to_string_lossy()),
+        }
+    }
 }
 
 #[derive(Debug)]
