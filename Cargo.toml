@@ -5,6 +5,7 @@ edition = "2021"
 description = "clamd client"
 license = "MIT"
 readme = "README.md"
+authors = ["n01e0 <reoshiseki@gmail.com>"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
